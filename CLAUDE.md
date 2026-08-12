@@ -73,7 +73,8 @@ External Dependencies:
 
 ## Tech Stack
 
-- **Language:** Go 1.22+
+- **Language:** Go 1.24+ (floor set by `k8s.io/client-go`, pinned to v0.31.x —
+  later client-go releases push the `go` directive to 1.26)
 - **TUI:** github.com/charmbracelet/bubbletea
 - **TUI Components:** github.com/charmbracelet/bubbles
 - **TUI Styling:** github.com/charmbracelet/lipgloss
@@ -100,7 +101,13 @@ ocpgate/
 │
 ├── cmd/
 │   └── ocpgate/
-│       └── main.go                    # Entrypoint, cobra root command setup
+│       ├── main.go                    # Entrypoint + top-level signal context
+│       ├── root.go                    # Cobra root, shared app deps, registry bootstrap
+│       ├── connect.go                 # `connect` — auth → session → subshell → cleanup
+│       ├── clusters.go                # `clusters list` / `clusters sync`
+│       ├── sessions.go                # `sessions prune` — clean up after crashed runs
+│       ├── prompt.go                  # Username + masked password prompts
+│       └── connect_test.go            # End-to-end CLI test against a fake OCP server
 │
 ├── internal/
 │   ├── registry/
@@ -216,18 +223,30 @@ type Authenticator interface {
 type Session struct {
     ID          string
     ClusterName string
+    Environment string   // carried so audit events need no registry lookup
     Username    string
+    Namespace   string
+    Dir         string   // per-session dir; removed wholesale by End
     KubeconfigPath string
     StartedAt   time.Time
     ExpiresAt   time.Time
 }
 
-type SessionManager interface {
-    Start(cluster registry.ClusterEntry, auth auth.AuthResult) (*Session, error)
-    End(session *Session) error
+// Implemented by session.FileManager.
+type Manager interface {
+    Start(cluster registry.ClusterEntry, result auth.AuthResult) (*Session, error)
+    End(session *Session) error   // idempotent: defer and signal handler may both fire
     IsExpired(session *Session) bool
 }
 ```
+
+`FileManager` also exposes `PruneStale(maxAge)`, which removes session
+directories left behind by processes killed before their cleanup ran
+(SIGKILL, crash, power loss). Exposed as `ocpgate sessions prune`.
+
+`End` refuses to remove any path outside its base directory — it takes a
+caller-supplied path and hands it to `RemoveAll`, so that guard is what
+keeps a malformed `Session` from becoming a recursive delete.
 
 ### Audit
 ```go
@@ -248,52 +267,78 @@ const (
 )
 
 type AuditEvent struct {
-    Timestamp   time.Time
+    Timestamp   time.Time   // filled in by the logger when zero
     EventType   EventType
     Username    string
     ClusterName string
     Environment string
+    APIEndpoint string      // -> cluster.api_endpoint in the emitted JSON
     SessionID   string
+    TokenExpiry time.Time   // -> session.token_expiry
     Outcome     Outcome
     Message     string
-    SourceHost  string
-    SourceIP    string
+    SourceHost  string      // filled in by the logger when empty
+    SourceIP    string      // filled in by the logger when empty
 }
 
-type AuditLogger interface {
+// Named audit.Logger, not audit.AuditLogger, to avoid the stutter.
+// Implemented by audit.StdoutLogger and audit.NopLogger (audit.enabled: false).
+type Logger interface {
     Log(event AuditEvent)
 }
 ```
+
+Empty `user` / `cluster` / `session` / `source` blocks are omitted from the
+emitted JSON rather than written as empty objects. Encoding goes through
+zerolog because it writes each event as a single atomic `Write`, so
+concurrent goroutines cannot interleave half-written objects into the
+stream Fluentd is tailing.
 
 ---
 
 ## OCP OAuth Auth Flow
 
 ```
-User enters LDAP credentials (TUI masked input)
+User enters LDAP credentials (masked input)
         │
         ▼
-POST https://<cluster-api>/oauth/authorize
+GET https://<cluster-api>/.well-known/oauth-authorization-server
+        │                      (discovery — unauthenticated)
+        ▼
+authorization_endpoint  (on a real cluster this is a different host:
+                         oauth-openshift.apps.<domain>, not the API host)
+        │
+        ▼
+GET <authorization_endpoint>
      ?response_type=token
      &client_id=openshift-challenging-client
   Authorization: Basic base64(user:pass)
+  X-CSRF-Token: 1
         │
         ▼
 OCP OAuth validates against LDAP backend
         │
         ▼
-302 redirect with token in Location header fragment
+302 redirect with token in the Location header fragment
         │
         ▼
-Parse token + expiry from Location header
+Parse token + expires_in from the fragment
         │
         ▼
 Return AuthResult { Token, ExpiresAt, Username }
 ```
 
-Note: OCP's `openshift-challenging-client` is the built-in OAuth client that
-accepts Basic auth and returns a Bearer token. This is the standard OCP CLI auth
-flow used by `oc login`.
+Notes:
+- `openshift-challenging-client` is the built-in OAuth client that answers
+  a Basic-auth challenge with a Bearer token. Same flow as `oc login`.
+- `X-CSRF-Token: 1` is required. Without it OCP treats the call as a
+  browser session and serves the HTML login page instead of challenging.
+- The HTTP client must **not** follow the redirect: the token is in the
+  `Location` fragment, and the redirect target must never be fetched.
+- Discovery falls back to `<cluster-api>/oauth/authorize` when the
+  well-known endpoint is unavailable, rather than failing outright.
+- Credentials and tokens have redacting `String()`/`GoString()` methods, so
+  an accidental `%v` in a log line or error cannot leak them.
 
 ---
 
@@ -398,16 +443,58 @@ Views (in order):
 
 ## Build Order (follow this sequence)
 
-1. `pkg/config` — config loader first, everything depends on it
-2. `pkg/version` — version injection via ldflags
-3. `internal/registry` — GitLab sync + local cache
-4. `internal/auth` — OCP OAuth flow
-5. `internal/session` — temp kubeconfig + cleanup
-6. `internal/audit` — stdout JSON logger
-7. `cmd/ocpgate` — cobra CLI, wire everything together
-8. Non-interactive CLI mode: `ocpgate connect <cluster>` working end to end
-9. `internal/tui` — Bubble Tea views, built on top of working CLI foundation
-10. Hardening — signal handling, token expiry, error UX, retry logic
+1. ✅ `pkg/config` — config loader first, everything depends on it
+2. ✅ `pkg/version` — version injection via ldflags
+3. ✅ `internal/registry` — GitLab sync + local cache
+4. ✅ `internal/auth` — OCP OAuth flow
+5. ✅ `internal/session` — temp kubeconfig + cleanup
+6. ✅ `internal/audit` — stdout JSON logger
+7. ✅ `cmd/ocpgate` — cobra CLI, wire everything together
+8. ✅ Non-interactive CLI mode: `ocpgate connect <cluster>` working end to end
+9. ⬜ `internal/tui` — Bubble Tea views, built on top of working CLI foundation
+10. ⬜ Hardening — signal handling, token expiry, error UX, retry logic
+
+Steps 1–8 are done and covered by tests, including an end-to-end CLI test
+that drives `connect` against a fake OCP OAuth server and asserts the
+session directory is deleted afterwards.
+
+Partially done from step 10, because the CLI could not be correct without
+it: signal handling around the subshell, token-expiry recording, and
+stale-session pruning. Still open there: retry logic on transient GitLab /
+OAuth failures, and a token-expiry warning during a long-lived session.
+
+## CLI Surface (as built)
+
+```
+ocpgate                                  # help (TUI becomes the default view in step 9)
+ocpgate clusters list [-e production]    # cluster table, served from the local cache
+ocpgate clusters sync                    # force a GitLab sync
+ocpgate connect <cluster> [-u user] [-n namespace]
+ocpgate connect <cluster> -- oc get pods # run one command instead of a subshell
+ocpgate sessions prune [--older-than 24h]
+ocpgate version
+```
+
+Global flags: `--config`, `--insecure-skip-tls-verify` (mirrors
+`oc login --insecure-skip-tls-verify`; when set, the generated kubeconfig
+records it too so kubectl behaves the way ocpgate just did).
+
+### Output convention
+
+- **stdout** — audit JSON, one object per line, for Fluentd. Also the
+  cluster table from `clusters list`, since that is what a user piping the
+  command wants.
+- **stderr** — all human-facing status, prompts, and warnings.
+
+This keeps `ocpgate connect ... 1>>audit.log` a clean audit stream while
+the engineer still sees prompts and the session banner.
+
+### Degraded-mode behavior
+
+`clusters list` and `connect` work from the local cache when GitLab is
+unreachable or `OCPGATE_GITLAB_TOKEN` is unset — sync failure warns on
+stderr rather than blocking access to a cluster the engineer already knows
+about. An explicit `clusters sync` still fails loudly.
 
 ---
 
