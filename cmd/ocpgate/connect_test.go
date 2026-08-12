@@ -325,7 +325,7 @@ func TestClustersListReadsCache(t *testing.T) {
 }
 
 func TestSessionEnvOverridesInheritedKubeconfig(t *testing.T) {
-	env := sessionEnv(
+	env := session.Environ(
 		[]string{"PATH=/usr/bin", "KUBECONFIG=/home/me/.kube/config"},
 		&session.Session{
 			ID:             "session-123",

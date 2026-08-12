@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -238,10 +237,10 @@ func runInSession(sess *session.Session, command []string) error {
 	if len(command) > 0 {
 		cmd = exec.Command(command[0], command[1:]...)
 	} else {
-		cmd = exec.Command(loginShell())
+		cmd = exec.Command(session.LoginShell())
 	}
 
-	cmd.Env = sessionEnv(os.Environ(), sess)
+	cmd.Env = session.Environ(os.Environ(), sess)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -277,29 +276,4 @@ func runInSession(sess *session.Session, command []string) error {
 		return nil
 	}
 	return err
-}
-
-// sessionEnv points KUBECONFIG at the session config, dropping any
-// inherited KUBECONFIG rather than relying on later entries winning.
-func sessionEnv(environ []string, sess *session.Session) []string {
-	out := make([]string, 0, len(environ)+3)
-	for _, kv := range environ {
-		if strings.HasPrefix(kv, "KUBECONFIG=") {
-			continue
-		}
-		out = append(out, kv)
-	}
-
-	return append(out,
-		"KUBECONFIG="+sess.KubeconfigPath,
-		"OCPGATE_SESSION_ID="+sess.ID,
-		"OCPGATE_CLUSTER="+sess.ClusterName,
-	)
-}
-
-func loginShell() string {
-	if shell := os.Getenv("SHELL"); shell != "" {
-		return shell
-	}
-	return "/bin/sh"
 }

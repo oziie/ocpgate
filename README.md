@@ -119,6 +119,7 @@ change audit trail.
 ## Usage
 
 ```bash
+ocpgate                                   # launch the TUI
 ocpgate clusters list                     # cluster table (served from local cache)
 ocpgate clusters list -e production       # filter by environment
 ocpgate clusters sync                     # force a sync from GitLab
@@ -138,6 +139,50 @@ Global flags:
 |---|---|
 | `--config` | Path to config file (default `~/.config/ocpgate/config.yaml`) |
 | `--insecure-skip-tls-verify` | Skip verification of the cluster's certificate chain (mirrors `oc login`). The generated kubeconfig records this too, so `kubectl` behaves the way `ocpgate` just did. |
+
+### The TUI
+
+Running `ocpgate` with no subcommand opens the interactive interface:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  clusters                                                        │
+├──────────────────────────────────────────────────────────────────┤
+│  > ● prod-cluster-1     PRODUCTION    eu-west                    │
+│    ● prod-cluster-2     PRODUCTION    eu-central                 │
+│    ○ test-cluster-1     TEST          eu-west                    │
+│    ○ old-cluster        INACTIVE      eu-west   (auth disabled)  │
+│                                                                  │
+│  ↑/k up · ↓/j down · / filter · e cycle environment · ? more     │
+├──────────────────────────────────────────────────────────────────┤
+│  user: —   cluster: —   namespace: —   token: —                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+It walks the same four steps as the CLI — cluster → credentials →
+namespace → active session — with the status bar filling in as you go.
+
+| Key | Action |
+|---|---|
+| `↑`/`k`, `↓`/`j` | Navigate |
+| `/` | Search clusters (name, environment, or region) |
+| `e` | Cycle the environment filter: all → production → test |
+| `enter` | Select; in the session view, open a shell |
+| `esc` | Go back (discards any token already issued) |
+| `q` | End the session (session view) |
+| `ctrl+c` | Quit |
+
+The interface renders to **stderr**, so `ocpgate 1>>audit.log` captures the
+audit stream while the TUI is on screen. With no terminal attached — a pipe
+or a CI job — it prints help instead.
+
+In the active-session view, `enter` suspends the TUI and hands you a shell
+with `KUBECONFIG` already set; exiting the shell returns you to the
+countdown. `q` ends the session and deletes the kubeconfig.
+
+Namespace selection has a fallback: ordinary LDAP users on OCP usually
+cannot list namespaces cluster-wide, so if the lookup is refused you get a
+text field to type one instead. That is normal, not an error.
 
 ### A session
 
@@ -227,7 +272,8 @@ and `session.id` are mapped as `keyword` and stay filterable.
 | [`internal/auth`](internal/auth/) | OCP OAuth challenge flow: discovers the OAuth server, exchanges LDAP credentials for a short-lived Bearer token. Credentials and tokens carry redacting `String()` methods so a stray `%v` cannot leak them. |
 | [`internal/session`](internal/session/) | Writes a single-context kubeconfig (0600) into a per-session directory (0700) and removes it on exit. Cleanup is idempotent and refuses any path outside its own base directory. |
 | [`internal/audit`](internal/audit/) | Builds and emits audit events as newline-delimited JSON. |
-| [`internal/tui`](internal/tui/) | Bubble Tea views — cluster list, credential prompt, namespace selector, status bar. *(Not yet implemented; see [Roadmap](#roadmap).)* |
+| [`internal/ocp`](internal/ocp/) | Direct cluster API queries that are neither auth nor session lifecycle — currently the namespace lookup behind the TUI selector. |
+| [`internal/tui`](internal/tui/) | Bubble Tea interface — cluster list, credential prompt, namespace selector, and an active-session view with a token countdown. Renders to stderr so stdout stays the audit stream. |
 | [`cmd/ocpgate`](cmd/ocpgate/) | Cobra CLI wiring the modules together. |
 
 ### Auth flow detail
@@ -260,7 +306,7 @@ different host from the API, which is why discovery comes first; it falls back t
 | Language | Go 1.24+ (single binary, no runtime deps) |
 | CLI | [cobra](https://github.com/spf13/cobra) |
 | Config | [viper](https://github.com/spf13/viper) |
-| TUI *(planned)* | [Bubble Tea](https://github.com/charmbracelet/bubbletea) + Bubbles + Lip Gloss |
+| TUI | [Bubble Tea](https://github.com/charmbracelet/bubbletea) + Bubbles + Lip Gloss |
 | GitLab client | [go-gitlab](https://github.com/xanzy/go-gitlab) |
 | Kubeconfig | [client-go](https://github.com/kubernetes/client-go) `clientcmd` |
 | Logging | [zerolog](https://github.com/rs/zerolog) (structured JSON) |
@@ -305,7 +351,7 @@ required.
 
 - [x] Config, version, registry, auth, session, audit modules
 - [x] Non-interactive CLI: `ocpgate connect <cluster>` end to end
-- [ ] Bubble Tea TUI — searchable cluster list, namespace selector, status bar
+- [x] Bubble Tea TUI — searchable cluster list, namespace selector, status bar
 - [ ] Retry logic on transient GitLab / OAuth failures
 - [ ] Token-expiry warning during long-lived sessions
 - [ ] Proxy mode — all API calls routed through ocpgate (v2)

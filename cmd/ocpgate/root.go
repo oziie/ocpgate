@@ -49,9 +49,7 @@ No kubeconfig, password, or token is ever written to a permanent location.`,
 			return a.setup()
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// The Bubble Tea TUI is the eventual default view; until it
-			// lands, the CLI subcommands are the whole interface.
-			return cmd.Help()
+			return a.runTUI(cmd)
 		},
 	}
 

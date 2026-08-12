@@ -135,8 +135,12 @@ ocpgate/
 │   │   ├── types.go                   # AuditEvent, EventType, Outcome structs
 │   │   └── audit_test.go
 │   │
+│   ├── ocp/
+│   │   └── namespaces.go              # Namespace lookup for the TUI selector
+│   │
 │   └── tui/
 │       ├── app.go                     # Root Bubble Tea model + update loop
+│       ├── run.go                     # Program startup + guaranteed session cleanup
 │       ├── views/
 │       │   ├── cluster_list.go        # Cluster selection view
 │       │   ├── credentials.go         # LDAP credential input view (masked)
@@ -451,22 +455,57 @@ Views (in order):
 6. ✅ `internal/audit` — stdout JSON logger
 7. ✅ `cmd/ocpgate` — cobra CLI, wire everything together
 8. ✅ Non-interactive CLI mode: `ocpgate connect <cluster>` working end to end
-9. ⬜ `internal/tui` — Bubble Tea views, built on top of working CLI foundation
+9. ✅ `internal/tui` — Bubble Tea views, built on top of working CLI foundation
 10. ⬜ Hardening — signal handling, token expiry, error UX, retry logic
 
-Steps 1–8 are done and covered by tests, including an end-to-end CLI test
-that drives `connect` against a fake OCP OAuth server and asserts the
-session directory is deleted afterwards.
+Steps 1–9 are done and covered by tests, including an end-to-end CLI test
+that drives `connect` against a fake OCP OAuth server, and a TUI test that
+drives the full model flow with fake collaborators.
 
-Partially done from step 10, because the CLI could not be correct without
-it: signal handling around the subshell, token-expiry recording, and
-stale-session pruning. Still open there: retry logic on transient GitLab /
-OAuth failures, and a token-expiry warning during a long-lived session.
+Partially done from step 10, because the earlier steps could not be
+correct without it: signal handling around the subshell, token-expiry
+recording, stale-session pruning, and the non-terminal fallback. Still
+open: retry logic on transient GitLab / OAuth failures, and a visible
+warning as a long-lived session's token approaches expiry.
+
+## TUI (step 9, as built)
+
+State machine in `internal/tui/app.go`:
+
+```
+stateClusters → stateCredentials → stateNamespaces → stateSession
+     ↑                  │                  │
+     └──────── esc ─────┴──────────────────┘   (esc discards any issued token)
+```
+
+Asynchronous steps (auth, namespace lookup, session start) run as Bubble
+Tea commands and report back as messages, so the update loop never blocks
+on the network.
+
+Notable decisions:
+
+- **The TUI renders to stderr**, via `tea.WithOutput(os.Stderr)`. stdout
+  stays reserved for the audit JSON stream, so `ocpgate 1>>audit.log`
+  works while the interface is on screen. This is why `runTUI` requires
+  *both* stdin and stderr to be terminals before launching — checking only
+  stdin would let `ocpgate 2>log` past the guard and then fail inside
+  Bubble Tea. Without a terminal it falls back to `--help`.
+- **Session cleanup lives in `tui.Run`, not in the model.** Bubble Tea has
+  no teardown hook, and the kubeconfig must be removed even when the
+  program exits through Ctrl-C.
+- **The namespace selector has two shapes.** Ordinary OCP users usually
+  cannot list namespaces cluster-wide, so `ErrNamespacesForbidden` falls
+  back to a free-text field presented as normal, not as an error.
+- **`enter` in the session view opens a shell** via `tea.ExecProcess`,
+  which suspends the TUI and restores it when the shell exits.
+- Views must tolerate being resized before they are constructed: Bubble
+  Tea reports the window size at startup, long before the namespace view
+  exists.
 
 ## CLI Surface (as built)
 
 ```
-ocpgate                                  # help (TUI becomes the default view in step 9)
+ocpgate                                  # launch the TUI (help when not on a terminal)
 ocpgate clusters list [-e production]    # cluster table, served from the local cache
 ocpgate clusters sync                    # force a GitLab sync
 ocpgate connect <cluster> [-u user] [-n namespace]
