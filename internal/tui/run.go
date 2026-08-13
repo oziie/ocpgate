@@ -69,7 +69,9 @@ func endSession(model Model, logger audit.Logger) {
 		event.APIEndpoint = cluster.APIEndpoint
 	}
 
-	expired := manager.IsExpired(sess)
+	// Already recorded if the countdown noticed the lapse while the
+	// session was still open.
+	expired := manager.IsExpired(sess) && !model.TokenExpiryLogged()
 
 	if err := manager.End(sess); err != nil {
 		event.Outcome = audit.OutcomeFailure

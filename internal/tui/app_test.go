@@ -268,6 +268,43 @@ func TestExpiredTokenIsAuditedSeparately(t *testing.T) {
 		h.audit.types())
 }
 
+func TestTokenExpiryIsRecordedOnceWhileSessionIsOpen(t *testing.T) {
+	h := newHarness(t)
+
+	h.selectFirstCluster(t)
+	h.authenticate(t)
+	h.run(tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, stateSession, h.model.state)
+
+	// The token lapses while the engineer is still in the session view.
+	h.session.expired = true
+	h.send(tickMsg(time.Now()))
+
+	assert.Equal(t, []string{"auth_attempt", "session_start", "token_expired"}, h.audit.types())
+	assert.Contains(t, h.model.View(), "token expired")
+
+	// Later ticks must not repeat it.
+	h.send(tickMsg(time.Now()))
+	h.send(tickMsg(time.Now()))
+	assert.Equal(t, []string{"auth_attempt", "session_start", "token_expired"}, h.audit.types())
+
+	// Nor may teardown, which checks expiry too.
+	endSession(h.model, h.audit)
+	assert.Equal(t,
+		[]string{"auth_attempt", "session_start", "token_expired", "session_end"},
+		h.audit.types())
+}
+
+func TestTickDoesNotRecordExpiryBeforeTheSessionStarts(t *testing.T) {
+	h := newHarness(t)
+	h.session.expired = true
+
+	h.selectFirstCluster(t)
+	h.send(tickMsg(time.Now()))
+
+	assert.Empty(t, h.audit.types(), "no session, nothing to expire")
+}
+
 func TestAuthFailureKeepsUserOnFormAndAuditsFailure(t *testing.T) {
 	h := newHarness(t, func(d *Deps) {
 		d.Authenticator = &fakeAuthenticator{err: auth.ErrInvalidCredentials}

@@ -28,8 +28,15 @@ const (
 
 // newFakeCluster serves the two endpoints connect depends on: OAuth
 // discovery and the challenging-client authorize endpoint.
-func newFakeCluster(t *testing.T) *httptest.Server {
+// newFakeCluster serves discovery and authorize. expiresIn overrides the
+// token lifetime in seconds, so a test can watch one lapse.
+func newFakeCluster(t *testing.T, expiresIn ...int) *httptest.Server {
 	t.Helper()
+
+	lifetime := 86400
+	if len(expiresIn) > 0 {
+		lifetime = expiresIn[0]
+	}
 
 	mux := http.NewServeMux()
 	server := httptest.NewTLSServer(mux)
@@ -47,7 +54,8 @@ func newFakeCluster(t *testing.T) *httptest.Server {
 			return
 		}
 		w.Header().Set("Location", fmt.Sprintf(
-			"https://oauth.example.com/implicit#access_token=%s&expires_in=86400&token_type=Bearer", e2eToken))
+			"https://oauth.example.com/implicit#access_token=%s&expires_in=%d&token_type=Bearer",
+			e2eToken, lifetime))
 		w.WriteHeader(http.StatusFound)
 	})
 
@@ -290,6 +298,52 @@ func TestConnectUnknownCluster(t *testing.T) {
 	_, _, err := env.run(t, "", "connect", "no-such-cluster", "--", "true")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found in registry")
+}
+
+func TestConnectWarnsAndAuditsWhenTokenExpiresMidSession(t *testing.T) {
+	// A one-second token, and a command that outlives it.
+	server := newFakeCluster(t, 1)
+	env := setupE2E(t, server.URL, true)
+
+	stdout, stderr, err := env.run(t, e2ePass+"\n",
+		"connect", "prod-cluster-1", "--username", e2eUser, "--insecure-skip-tls-verify",
+		"--", "sh", "-c", "sleep 2")
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	types := eventTypes(auditEvents(t, stdout))
+	assert.Contains(t, types, "token_expired",
+		"an expiry during the session must reach the audit trail")
+
+	// Both the watcher and the teardown can notice the lapse; only one
+	// event may be emitted.
+	expiredCount := 0
+	for _, eventType := range types {
+		if eventType == "token_expired" {
+			expiredCount++
+		}
+	}
+	assert.Equal(t, 1, expiredCount, "token_expired must not be recorded twice")
+
+	// And the engineer, who has no status bar inside a shell, is told.
+	assert.Contains(t, stderr, "has expired")
+}
+
+func TestConnectDoesNotWarnWhenTokenOutlivesSession(t *testing.T) {
+	server := newFakeCluster(t)
+	env := setupE2E(t, server.URL, true)
+
+	stdout, stderr, err := env.run(t, e2ePass+"\n",
+		"connect", "prod-cluster-1", "--username", e2eUser, "--insecure-skip-tls-verify", "--", "true")
+	require.NoError(t, err, "stderr: %s", stderr)
+
+	assert.NotContains(t, eventTypes(auditEvents(t, stdout)), "token_expired")
+
+	// The banner reports the expiry once at startup ("token: expires in
+	// 24h0m0s"); what must not appear is a countdown warning, which the
+	// watcher phrases as "token for <cluster> expires in ...".
+	assert.NotContains(t, stderr, "token for prod-cluster-1",
+		"a 24h token needs no countdown warning")
+	assert.NotContains(t, stderr, "has expired")
 }
 
 func TestConnectCleansUpWhenChildCommandFails(t *testing.T) {

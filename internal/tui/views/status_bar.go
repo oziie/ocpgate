@@ -1,12 +1,12 @@
 package views
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/oziie/ocpgate/internal/session"
 	"github.com/oziie/ocpgate/internal/tui/styles"
 )
 
@@ -64,27 +64,11 @@ func (s StatusBar) token(now time.Time) string {
 	}
 }
 
-// FormatRemaining renders a duration as a compact countdown: 2h04m, 14m09s,
-// or 45s. Seconds are shown under an hour so a session nearing its end
-// visibly ticks rather than sitting on a stale minute count.
+// FormatRemaining renders a duration as a compact countdown. It is defined
+// in the session package, which owns token lifetime; re-exported here so
+// views do not reach across for a formatting helper.
 func FormatRemaining(d time.Duration) string {
-	if d <= 0 {
-		return "expired"
-	}
-
-	d = d.Round(time.Second)
-	hours := int(d.Hours())
-	minutes := int(d.Minutes()) % 60
-	seconds := int(d.Seconds()) % 60
-
-	switch {
-	case hours > 0:
-		return fmt.Sprintf("%dh%02dm", hours, minutes)
-	case minutes > 0:
-		return fmt.Sprintf("%dm%02ds", minutes, seconds)
-	default:
-		return fmt.Sprintf("%ds", seconds)
-	}
+	return session.FormatRemaining(d)
 }
 
 // Help renders a hint line above the status bar.

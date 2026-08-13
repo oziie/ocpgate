@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/xanzy/go-gitlab"
 	"gopkg.in/yaml.v3"
 
+	"github.com/oziie/ocpgate/internal/retry"
 	"github.com/oziie/ocpgate/pkg/config"
 )
 
@@ -26,16 +28,25 @@ type GitLabRegistry struct {
 	projectID string
 	branch    string
 	cache     *Cache
+	retry     retry.Policy
 
 	mu         sync.RWMutex
 	clusters   []ClusterEntry
 	lastSynced time.Time
 }
 
+// Option customizes a GitLabRegistry.
+type Option func(*GitLabRegistry)
+
+// WithRetryPolicy overrides how transient GitLab failures are retried.
+func WithRetryPolicy(p retry.Policy) Option {
+	return func(r *GitLabRegistry) { r.retry = p }
+}
+
 // NewGitLabRegistry builds a registry client against cfg.GitLabURL /
 // cfg.ProjectID, authenticated with token, and preloads the in-memory
 // snapshot from the local disk cache so List/Get work before Sync runs.
-func NewGitLabRegistry(cfg config.RegistryConfig, token string) (*GitLabRegistry, error) {
+func NewGitLabRegistry(cfg config.RegistryConfig, token string, opts ...Option) (*GitLabRegistry, error) {
 	if cfg.ProjectID == "" {
 		return nil, fmt.Errorf("registry.project_id is not configured")
 	}
@@ -43,12 +54,18 @@ func NewGitLabRegistry(cfg config.RegistryConfig, token string) (*GitLabRegistry
 		return nil, fmt.Errorf("registry.cache_path is not configured")
 	}
 
-	opts := []gitlab.ClientOptionFunc{}
+	// go-gitlab wraps its transport in retryablehttp with RetryMax 5 and a
+	// backoff running to 30s. Left on, that nests inside our own retry
+	// loop — up to 15 attempts and minutes of sleeping behind a prompt —
+	// and it has no notion of which failures are permanent, so it would
+	// happily re-send a request the server already rejected outright.
+	// One retry layer, ours, with the transient/definitive distinction.
+	clientOpts := []gitlab.ClientOptionFunc{gitlab.WithoutRetries()}
 	if cfg.GitLabURL != "" {
-		opts = append(opts, gitlab.WithBaseURL(cfg.GitLabURL))
+		clientOpts = append(clientOpts, gitlab.WithBaseURL(cfg.GitLabURL))
 	}
 
-	client, err := gitlab.NewClient(token, opts...)
+	client, err := gitlab.NewClient(token, clientOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create gitlab client: %w", err)
 	}
@@ -64,25 +81,55 @@ func NewGitLabRegistry(cfg config.RegistryConfig, token string) (*GitLabRegistry
 		return nil, err
 	}
 
-	return &GitLabRegistry{
+	r := &GitLabRegistry{
 		client:     client,
 		projectID:  cfg.ProjectID,
 		branch:     branch,
 		cache:      cache,
+		retry:      retry.DefaultPolicy(),
 		clusters:   clusters,
 		lastSynced: syncedAt,
-	}, nil
+	}
+	for _, apply := range opts {
+		apply(r)
+	}
+
+	return r, nil
+}
+
+// classifyGitLabError marks failures that another attempt cannot fix. A
+// bad token or a missing project stays broken no matter how many times it
+// is asked; rate limiting and 5xx are worth waiting out.
+func classifyGitLabError(resp *gitlab.Response, err error) error {
+	if err == nil {
+		return nil
+	}
+	if resp != nil && resp.Response != nil {
+		status := resp.StatusCode
+		if status != http.StatusTooManyRequests && status < http.StatusInternalServerError {
+			return retry.Permanent(err)
+		}
+	}
+	return err
 }
 
 // Sync lists clusters/*.yaml in the configured branch, fetches and parses
 // each file, validates the result, and atomically replaces both the
 // in-memory snapshot and the on-disk cache.
 func (r *GitLabRegistry) Sync(ctx context.Context) error {
-	tree, _, err := r.client.Repositories.ListTree(r.projectID, &gitlab.ListTreeOptions{
-		Path:      gitlab.Ptr(clustersDir),
-		Ref:       gitlab.Ptr(r.branch),
-		Recursive: gitlab.Ptr(false),
-	}, gitlab.WithContext(ctx))
+	var tree []*gitlab.TreeNode
+	err := retry.Do(ctx, r.retry, func(ctx context.Context) error {
+		nodes, resp, err := r.client.Repositories.ListTree(r.projectID, &gitlab.ListTreeOptions{
+			Path:      gitlab.Ptr(clustersDir),
+			Ref:       gitlab.Ptr(r.branch),
+			Recursive: gitlab.Ptr(false),
+		}, gitlab.WithContext(ctx))
+		if err != nil {
+			return classifyGitLabError(resp, err)
+		}
+		tree = nodes
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("list cluster-registry tree: %w", err)
 	}
@@ -93,9 +140,17 @@ func (r *GitLabRegistry) Sync(ctx context.Context) error {
 			continue
 		}
 
-		raw, _, err := r.client.RepositoryFiles.GetRawFile(r.projectID, node.Path, &gitlab.GetRawFileOptions{
-			Ref: gitlab.Ptr(r.branch),
-		}, gitlab.WithContext(ctx))
+		var raw []byte
+		err := retry.Do(ctx, r.retry, func(ctx context.Context) error {
+			content, resp, err := r.client.RepositoryFiles.GetRawFile(r.projectID, node.Path, &gitlab.GetRawFileOptions{
+				Ref: gitlab.Ptr(r.branch),
+			}, gitlab.WithContext(ctx))
+			if err != nil {
+				return classifyGitLabError(resp, err)
+			}
+			raw = content
+			return nil
+		})
 		if err != nil {
 			return fmt.Errorf("fetch %s: %w", node.Path, err)
 		}

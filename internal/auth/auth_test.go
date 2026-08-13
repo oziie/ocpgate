@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/oziie/ocpgate/internal/registry"
+	"github.com/oziie/ocpgate/internal/retry"
 )
 
 const (
@@ -35,6 +36,12 @@ type fakeOCP struct {
 	authorizeCalls int
 	lastCSRFHeader string
 	lastQuery      map[string]string
+
+	// transientFailures makes the next N authorize calls return 503, to
+	// simulate an OAuth server that is briefly unwell.
+	transientFailures int
+	// discoveryFailures does the same for the discovery endpoint.
+	discoveryFailures int
 }
 
 func newFakeOCP(t *testing.T, serveDiscovery bool) (*fakeOCP, *httptest.Server) {
@@ -51,6 +58,11 @@ func (f *fakeOCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case discoveryPath:
 		f.discoveryCalls++
+		if f.discoveryFailures > 0 {
+			f.discoveryFailures--
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		if !f.serveDiscovery {
 			http.NotFound(w, r)
 			return
@@ -61,6 +73,11 @@ func (f *fakeOCP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case "/oauth/authorize":
 		f.authorizeCalls++
+		if f.transientFailures > 0 {
+			f.transientFailures--
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		f.lastCSRFHeader = r.Header.Get("X-CSRF-Token")
 		f.lastQuery = map[string]string{
 			"client_id":     r.URL.Query().Get("client_id"),
@@ -96,7 +113,12 @@ func testCluster(server *httptest.Server) registry.ClusterEntry {
 }
 
 func newTestAuthenticator(server *httptest.Server) *OCPAuthenticator {
-	return NewOCPAuthenticator(WithHTTPClient(server.Client()), WithTimeout(5*time.Second))
+	return NewOCPAuthenticator(
+		WithHTTPClient(server.Client()),
+		WithTimeout(5*time.Second),
+		// Same attempt count as production, without the real backoff.
+		WithRetryPolicy(retry.Policy{Attempts: 3, BaseDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond}),
+	)
 }
 
 func TestAuthenticateSuccessViaDiscovery(t *testing.T) {
@@ -132,6 +154,83 @@ func TestAuthenticateFallsBackWhenDiscoveryMissing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, testToken, result.Token)
 	assert.Equal(t, 1, fake.authorizeCalls, "should fall back to <api>/oauth/authorize")
+}
+
+func TestAuthenticateRetriesTransientOAuthFailure(t *testing.T) {
+	fake, server := newFakeOCP(t, true)
+	fake.transientFailures = 2
+	auth := newTestAuthenticator(server)
+
+	result, err := auth.Authenticate(context.Background(), testCluster(server), Credentials{
+		Username: testUser,
+		Password: testPass,
+	})
+	require.NoError(t, err, "a brief 503 should not fail the login")
+
+	assert.Equal(t, testToken, result.Token)
+	assert.Equal(t, 3, fake.authorizeCalls, "two failures then success")
+}
+
+func TestAuthenticateGivesUpAfterRepeatedTransientFailures(t *testing.T) {
+	fake, server := newFakeOCP(t, true)
+	fake.transientFailures = 99
+	auth := newTestAuthenticator(server)
+
+	_, err := auth.Authenticate(context.Background(), testCluster(server), Credentials{
+		Username: testUser,
+		Password: testPass,
+	})
+	require.Error(t, err)
+
+	assert.Equal(t, 3, fake.authorizeCalls, "should stop at the policy's attempt limit")
+	assert.Contains(t, err.Error(), "after 3 attempts")
+	assert.NotErrorIs(t, err, ErrInvalidCredentials,
+		"an unavailable server must not be reported as a bad password")
+}
+
+func TestAuthenticateNeverRetriesRejectedCredentials(t *testing.T) {
+	fake, server := newFakeOCP(t, true)
+	auth := newTestAuthenticator(server)
+
+	_, err := auth.Authenticate(context.Background(), testCluster(server), Credentials{
+		Username: testUser,
+		Password: "wrong-password",
+	})
+	require.ErrorIs(t, err, ErrInvalidCredentials)
+
+	// Repeating a bad password is useless and risks an LDAP lockout.
+	assert.Equal(t, 1, fake.authorizeCalls)
+}
+
+func TestDiscoveryRetriesBeforeFallingBack(t *testing.T) {
+	fake, server := newFakeOCP(t, true)
+	fake.discoveryFailures = 1
+	auth := newTestAuthenticator(server)
+
+	result, err := auth.Authenticate(context.Background(), testCluster(server), Credentials{
+		Username: testUser,
+		Password: testPass,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, testToken, result.Token)
+	assert.Equal(t, 2, fake.discoveryCalls,
+		"a transient discovery failure should be retried, not silently fall back")
+}
+
+func TestDiscoveryDoesNotRetryWhenUnpublished(t *testing.T) {
+	fake, server := newFakeOCP(t, false)
+	auth := newTestAuthenticator(server)
+
+	_, err := auth.Authenticate(context.Background(), testCluster(server), Credentials{
+		Username: testUser,
+		Password: testPass,
+	})
+	require.NoError(t, err)
+
+	// A 404 means the cluster does not publish discovery; retrying it
+	// would just delay every login on such a cluster.
+	assert.Equal(t, 1, fake.discoveryCalls)
 }
 
 func TestAuthenticateInvalidCredentials(t *testing.T) {

@@ -11,27 +11,6 @@ import (
 	"github.com/oziie/ocpgate/internal/tui/keys"
 )
 
-func TestFormatRemaining(t *testing.T) {
-	cases := []struct {
-		name string
-		in   time.Duration
-		want string
-	}{
-		{"hours pad minutes", 2*time.Hour + 4*time.Minute, "2h04m"},
-		{"just under a day", 23*time.Hour + 59*time.Minute, "23h59m"},
-		{"minutes show seconds", 14*time.Minute + 9*time.Second, "14m09s"},
-		{"under a minute", 45 * time.Second, "45s"},
-		{"zero", 0, "expired"},
-		{"negative", -time.Minute, "expired"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, FormatRemaining(tc.in))
-		})
-	}
-}
-
 func TestStatusBarShowsDashesBeforeAnythingIsChosen(t *testing.T) {
 	bar := StatusBar{}.View(time.Now())
 

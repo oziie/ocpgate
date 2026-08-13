@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/oziie/ocpgate/internal/registry"
+	"github.com/oziie/ocpgate/internal/retry"
 )
 
 // ErrNamespacesForbidden means the token is valid but not allowed to list
@@ -24,7 +25,8 @@ import (
 var ErrNamespacesForbidden = fmt.Errorf("not allowed to list namespaces on this cluster")
 
 // ListNamespaces returns the namespaces visible to the given token, sorted
-// by name.
+// by name. Transient API failures are retried; a refusal is not, since the
+// token's permissions will not change between attempts.
 func ListNamespaces(ctx context.Context, cluster registry.ClusterEntry, token string, insecureSkipTLSVerify bool) ([]string, error) {
 	client, err := kubernetes.NewForConfig(&rest.Config{
 		Host:        cluster.APIEndpoint,
@@ -37,19 +39,41 @@ func ListNamespaces(ctx context.Context, cluster registry.ClusterEntry, token st
 		return nil, fmt.Errorf("build cluster client: %w", err)
 	}
 
-	list, err := client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) {
-			return nil, ErrNamespacesForbidden
+	var names []string
+	err = retry.Do(ctx, retry.DefaultPolicy(), func(ctx context.Context) error {
+		list, err := client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return classifyAPIError(err)
 		}
-		return nil, fmt.Errorf("list namespaces: %w", err)
+
+		names = make([]string, 0, len(list.Items))
+		for _, ns := range list.Items {
+			names = append(names, ns.Name)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	names := make([]string, 0, len(list.Items))
-	for _, ns := range list.Items {
-		names = append(names, ns.Name)
-	}
 	sort.Strings(names)
-
 	return names, nil
+}
+
+// classifyAPIError separates "the cluster is briefly unwell" from "this
+// token is not allowed to do that".
+func classifyAPIError(err error) error {
+	switch {
+	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+		return retry.Permanent(ErrNamespacesForbidden)
+	case apierrors.IsServerTimeout(err), apierrors.IsTimeout(err),
+		apierrors.IsTooManyRequests(err), apierrors.IsInternalError(err),
+		apierrors.IsServiceUnavailable(err):
+		return fmt.Errorf("list namespaces: %w", err)
+	case apierrors.IsNotFound(err), apierrors.IsBadRequest(err), apierrors.IsMethodNotSupported(err):
+		return retry.Permanent(fmt.Errorf("list namespaces: %w", err))
+	default:
+		// Network-level failures land here and are worth another try.
+		return fmt.Errorf("list namespaces: %w", err)
+	}
 }

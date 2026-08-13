@@ -108,9 +108,52 @@ func (a *app) runConnect(cmd *cobra.Command, clusterName string, command []strin
 	// kubeconfig never outlives the process that created it.
 	defer a.endSession(manager, sess, *cluster)
 
+	// A shell has no status bar, so the countdown has to come to the
+	// engineer. The watcher stops as soon as the session body returns.
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	go a.watchExpiry(watchCtx, sess, *cluster)
+
 	a.printSessionBanner(sess, *cluster, len(command) > 0)
 
 	return runInSession(sess, command)
+}
+
+// watchExpiry warns as the token runs down and records the moment it
+// lapses, so the audit trail shows a session that outlived its token
+// rather than one that merely ended late.
+func (a *app) watchExpiry(ctx context.Context, sess *session.Session, cluster registry.ClusterEntry) {
+	session.ExpiryWatcher{
+		ExpiresAt:  sess.ExpiresAt,
+		Thresholds: session.DefaultExpiryThresholds(),
+		OnWarn: func(remaining time.Duration) {
+			a.warnf("token for %s expires in %s", cluster.Name, session.FormatRemaining(remaining))
+		},
+		OnExpire: func() {
+			a.warnf("token for %s has expired; cluster commands will start failing", cluster.Name)
+			a.logTokenExpired(sess, cluster)
+		},
+	}.Run(ctx)
+}
+
+// logTokenExpired emits the expiry event at most once, whether it is
+// noticed by the watcher during the session or by endSession afterwards.
+func (a *app) logTokenExpired(sess *session.Session, cluster registry.ClusterEntry) {
+	if !a.expiryLogged.CompareAndSwap(false, true) {
+		return
+	}
+
+	a.audit.Log(audit.AuditEvent{
+		EventType:   audit.EventTokenExpired,
+		Username:    sess.Username,
+		ClusterName: cluster.Name,
+		Environment: cluster.Environment,
+		APIEndpoint: cluster.APIEndpoint,
+		SessionID:   sess.ID,
+		TokenExpiry: sess.ExpiresAt,
+		Outcome:     audit.OutcomeSuccess,
+		Message:     "token expired before the session ended",
+	})
 }
 
 // collectCredentials fills in whatever the flags did not supply.
@@ -192,19 +235,12 @@ func (a *app) endSession(manager session.Manager, sess *session.Session, cluster
 	}
 	a.audit.Log(event)
 
-	// Recorded separately so an expiry is searchable in OpenSearch
-	// without parsing session durations.
+	// Recorded separately so an expiry is searchable in OpenSearch without
+	// parsing session durations. The watcher usually gets here first; this
+	// covers the case where the process was suspended straight through the
+	// expiry and never woke to notice.
 	if expired {
-		a.audit.Log(audit.AuditEvent{
-			EventType:   audit.EventTokenExpired,
-			Username:    sess.Username,
-			ClusterName: cluster.Name,
-			Environment: cluster.Environment,
-			SessionID:   sess.ID,
-			TokenExpiry: sess.ExpiresAt,
-			Outcome:     audit.OutcomeSuccess,
-			Message:     "token expired before the session ended",
-		})
+		a.logTokenExpired(sess, cluster)
 	}
 
 	a.infof("Session %s ended; temporary kubeconfig removed.", sess.ID)

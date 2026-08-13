@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/oziie/ocpgate/internal/registry"
+	"github.com/oziie/ocpgate/internal/retry"
 )
 
 const (
@@ -31,12 +32,14 @@ const (
 // server, which is configured to validate credentials against LDAP.
 type OCPAuthenticator struct {
 	client *http.Client
+	retry  retry.Policy
 }
 
 type options struct {
 	timeout               time.Duration
 	insecureSkipTLSVerify bool
 	httpClient            *http.Client
+	retryPolicy           retry.Policy
 }
 
 // Option customizes an OCPAuthenticator.
@@ -62,10 +65,15 @@ func WithHTTPClient(c *http.Client) Option {
 	return func(o *options) { o.httpClient = c }
 }
 
+// WithRetryPolicy overrides how transient OAuth failures are retried.
+func WithRetryPolicy(p retry.Policy) Option {
+	return func(o *options) { o.retryPolicy = p }
+}
+
 // NewOCPAuthenticator builds an Authenticator for OCP's challenging-client
 // OAuth flow.
 func NewOCPAuthenticator(opts ...Option) *OCPAuthenticator {
-	o := options{timeout: defaultTimeout}
+	o := options{timeout: defaultTimeout, retryPolicy: retry.DefaultPolicy()}
 	for _, apply := range opts {
 		apply(&o)
 	}
@@ -99,7 +107,7 @@ func NewOCPAuthenticator(opts ...Option) *OCPAuthenticator {
 		return http.ErrUseLastResponse
 	}
 
-	return &OCPAuthenticator{client: &client}
+	return &OCPAuthenticator{client: &client, retry: o.retryPolicy}
 }
 
 // Authenticate exchanges LDAP credentials for a short-lived Bearer token
@@ -125,40 +133,84 @@ func (a *OCPAuthenticator) Authenticate(ctx context.Context, cluster registry.Cl
 // to find it. When discovery is unavailable, fall back to the API host's
 // own /oauth/authorize rather than failing — some clusters serve it there,
 // and a wrong guess surfaces as a clear auth error one request later.
+// Transient failures are retried before falling back, so a momentary blip
+// does not silently redirect the whole flow to an endpoint that may not
+// serve the challenge.
 func (a *OCPAuthenticator) discoverAuthorizeEndpoint(ctx context.Context, apiEndpoint string) string {
 	fallback := strings.TrimSuffix(apiEndpoint, "/") + "/oauth/authorize"
 
+	var endpoint string
+	err := retry.Do(ctx, a.retry, func(ctx context.Context) error {
+		found, err := a.attemptDiscovery(ctx, apiEndpoint)
+		if err != nil {
+			return err
+		}
+		endpoint = found
+		return nil
+	})
+	if err != nil || endpoint == "" {
+		return fallback
+	}
+	return endpoint
+}
+
+func (a *OCPAuthenticator) attemptDiscovery(ctx context.Context, apiEndpoint string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(apiEndpoint, "/")+discoveryPath, nil)
 	if err != nil {
-		return fallback
+		return "", retry.Permanent(err)
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return fallback
+		return "", fmt.Errorf("fetch oauth metadata: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fallback
+		err := fmt.Errorf("oauth metadata returned %s", resp.Status)
+		if !isRetryableStatus(resp.StatusCode) {
+			// A 404 means this cluster does not publish discovery at all;
+			// retrying cannot change that.
+			return "", retry.Permanent(err)
+		}
+		return "", err
 	}
 
 	var metadata struct {
 		AuthorizationEndpoint string `json:"authorization_endpoint"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil || metadata.AuthorizationEndpoint == "" {
-		return fallback
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		return "", retry.Permanent(fmt.Errorf("parse oauth metadata: %w", err))
 	}
-	return metadata.AuthorizationEndpoint
+	return metadata.AuthorizationEndpoint, nil
 }
 
-// requestToken performs the challenge request and reads the token out of
-// the resulting redirect.
+// requestToken performs the challenge request, retrying only failures that
+// could plausibly succeed on a second try. Rejected credentials are never
+// retried: it would not help, and repeating a bad password is a good way
+// to trip an LDAP account lockout.
 func (a *OCPAuthenticator) requestToken(ctx context.Context, authorizeURL string, creds Credentials) (*AuthResult, error) {
+	var result *AuthResult
+
+	err := retry.Do(ctx, a.retry, func(ctx context.Context) error {
+		attempt, err := a.attemptToken(ctx, authorizeURL, creds)
+		if err != nil {
+			return err
+		}
+		result = attempt
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (a *OCPAuthenticator) attemptToken(ctx context.Context, authorizeURL string, creds Credentials) (*AuthResult, error) {
 	u, err := url.Parse(authorizeURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid authorize endpoint %q: %w", authorizeURL, err)
+		return nil, retry.Permanent(fmt.Errorf("invalid authorize endpoint %q: %w", authorizeURL, err))
 	}
 
 	q := u.Query()
@@ -168,7 +220,7 @@ func (a *OCPAuthenticator) requestToken(ctx context.Context, authorizeURL string
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("build authorize request: %w", err)
+		return nil, retry.Permanent(fmt.Errorf("build authorize request: %w", err))
 	}
 	req.SetBasicAuth(creds.Username, creds.Password)
 	// Without this header OCP treats the call as a browser session and
@@ -177,27 +229,40 @@ func (a *OCPAuthenticator) requestToken(ctx context.Context, authorizeURL string
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		// Network-level failures are the transient case worth retrying.
 		return nil, fmt.Errorf("contact oauth server: %w", err)
 	}
 	defer resp.Body.Close()
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return nil, ErrInvalidCredentials
+		return nil, retry.Permanent(ErrInvalidCredentials)
+
 	case isRedirect(resp.StatusCode):
 		location := resp.Header.Get("Location")
 		if location == "" {
-			return nil, fmt.Errorf("oauth server returned %d without a Location header", resp.StatusCode)
+			return nil, retry.Permanent(fmt.Errorf("oauth server returned %d without a Location header", resp.StatusCode))
 		}
 		result, err := parseTokenFromLocation(location, time.Now())
 		if err != nil {
-			return nil, err
+			// A malformed redirect is a protocol mismatch, not a blip.
+			return nil, retry.Permanent(err)
 		}
 		result.Username = creds.Username
 		return result, nil
+
+	case isRetryableStatus(resp.StatusCode):
+		return nil, fmt.Errorf("oauth server unavailable: %s", resp.Status)
+
 	default:
-		return nil, fmt.Errorf("unexpected response from oauth server: %s", resp.Status)
+		return nil, retry.Permanent(fmt.Errorf("unexpected response from oauth server: %s", resp.Status))
 	}
+}
+
+// isRetryableStatus reports whether an HTTP status is worth another try:
+// rate limiting, or the server telling us it is currently unwell.
+func isRetryableStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status >= http.StatusInternalServerError
 }
 
 func isRedirect(status int) bool {

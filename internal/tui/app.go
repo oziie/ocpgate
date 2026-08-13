@@ -80,6 +80,10 @@ type Model struct {
 
 	notice string
 	fatal  error
+
+	// expiryLogged keeps the token_expired event to one per session; the
+	// countdown tick and the teardown in Run can both notice the lapse.
+	expiryLogged bool
 }
 
 // Messages produced by the asynchronous steps.
@@ -163,11 +167,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tick()
 
 	case tickMsg:
-		return m, tick()
+		return m.handleTick()
 	}
 
 	return m.updateActiveView(msg)
 }
+
+// handleTick drives the countdown and notices the moment the token
+// lapses. The status bar already shows time running out; this records it
+// in the audit trail and says plainly that commands will start failing,
+// since an expired token otherwise just looks like a broken cluster.
+func (m Model) handleTick() (tea.Model, tea.Cmd) {
+	if m.state == stateSession && m.session != nil && !m.expiryLogged &&
+		m.sessions != nil && m.sessions.IsExpired(m.session) {
+
+		m.expiryLogged = true
+		m.notice = "token expired — cluster commands will start failing"
+
+		m.deps.Audit.Log(audit.AuditEvent{
+			EventType:   audit.EventTokenExpired,
+			Username:    m.session.Username,
+			ClusterName: m.cluster.Name,
+			Environment: m.cluster.Environment,
+			APIEndpoint: m.cluster.APIEndpoint,
+			SessionID:   m.session.ID,
+			TokenExpiry: m.session.ExpiresAt,
+			Outcome:     audit.OutcomeSuccess,
+			Message:     "token expired before the session ended",
+		})
+	}
+
+	return m, tick()
+}
+
+// TokenExpiryLogged reports whether the expiry event has already been
+// emitted, so teardown does not repeat it.
+func (m Model) TokenExpiryLogged() bool { return m.expiryLogged }
 
 // handleKey applies the bindings for the current state.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

@@ -4,29 +4,30 @@
 |---|---|
 | Result | **PASS** |
 | Target | `fakes` |
-| Generated | 2026-08-13T07:20:58Z |
-| Commit | 97f4f68 (dirty) |
+| Generated | 2026-08-13T08:35:08Z |
+| Commit | 12e85e8 (dirty) |
 | Go | go1.24.5 darwin/arm64 |
 | Race detector | enabled |
-| Total coverage | 58.9% |
+| Total coverage | 67.1% |
 
-Tests: **61 passed**, **0 failed**, 0 skipped
-(including subtests: 78 passed, 0 failed)
+Tests: **100 passed**, **0 failed**, 0 skipped
+(including subtests: 117 passed, 0 failed)
 
 ## Packages
 
 | Package | Result | Time | Coverage |
 |---|---|---|---|
-| `cmd/ocpgate` | ok | 1.624s | 61.3% |
-| `internal/audit` | ok | 1.642s | 90.0% |
-| `internal/auth` | ok | 2.204s | 78.8% |
+| `cmd/ocpgate` | ok | 3.513s | 62.6% |
+| `internal/audit` | ok | 1.850s | 90.0% |
+| `internal/auth` | ok | 1.596s | 82.1% |
 | `internal/ocp` | no tests | — | 0.0% |
-| `internal/registry` | ok | 2.050s | 34.2% |
-| `internal/session` | ok | 1.218s | 73.2% |
+| `internal/registry` | ok | 1.715s | 85.9% |
+| `internal/retry` | ok | 2.341s | 91.7% |
+| `internal/session` | ok | 3.012s | 78.9% |
 | `internal/tui/keys` | no tests | — | 0.0% |
 | `internal/tui/styles` | no tests | — | — |
-| `internal/tui/views` | ok | 2.305s | 51.8% |
-| `internal/tui` | ok | 7.046s | 72.9% |
+| `internal/tui/views` | ok | 2.016s | 50.0% |
+| `internal/tui` | ok | 8.743s | 78.4% |
 | `pkg/config` | no tests | — | 0.0% |
 | `pkg/version` | no tests | — | 0.0% |
 
@@ -40,14 +41,14 @@ github.com/oziie/ocpgate/cmd/ocpgate/tui.go:67:				isTerminal			0.0%
 github.com/oziie/ocpgate/internal/audit/audit.go:70:			Log				0.0%
 github.com/oziie/ocpgate/internal/audit/stdout.go:29:			NewStdoutLogger			0.0%
 github.com/oziie/ocpgate/internal/auth/auth.go:32:			Error				0.0%
-github.com/oziie/ocpgate/internal/auth/ocp_oauth.go:53:			WithInsecureSkipTLSVerify	0.0%
-github.com/oziie/ocpgate/internal/ocp/namespaces.go:28:			ListNamespaces			0.0%
-github.com/oziie/ocpgate/internal/registry/gitlab.go:132:		List				0.0%
-github.com/oziie/ocpgate/internal/registry/gitlab.go:141:		Get				0.0%
-github.com/oziie/ocpgate/internal/registry/gitlab.go:154:		LastSynced			0.0%
-github.com/oziie/ocpgate/internal/registry/gitlab.go:160:		isYAML				0.0%
-github.com/oziie/ocpgate/internal/registry/gitlab.go:38:		NewGitLabRegistry		0.0%
-github.com/oziie/ocpgate/internal/registry/gitlab.go:80:		Sync				0.0%
+github.com/oziie/ocpgate/internal/auth/ocp_oauth.go:56:			WithInsecureSkipTLSVerify	0.0%
+github.com/oziie/ocpgate/internal/ocp/namespaces.go:30:			ListNamespaces			0.0%
+github.com/oziie/ocpgate/internal/ocp/namespaces.go:65:			classifyAPIError		0.0%
+github.com/oziie/ocpgate/internal/registry/registry.go:34:		Error				0.0%
+github.com/oziie/ocpgate/internal/retry/retry.go:45:			Error				0.0%
+github.com/oziie/ocpgate/internal/retry/retry.go:46:			Unwrap				0.0%
+github.com/oziie/ocpgate/internal/session/environ.go:15:		Environ				0.0%
+github.com/oziie/ocpgate/internal/session/environ.go:32:		LoginShell			0.0%
 ```
 
 ## What this run proves

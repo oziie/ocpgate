@@ -218,6 +218,30 @@ cluster you are talking to.
 So `ocpgate connect prod-cluster-1 1>>audit.log` keeps a clean audit stream while
 you still see prompts and the session banner.
 
+### Token expiry
+
+The token OCP issues is short-lived, and it expires silently — `kubectl`
+simply starts returning 401, which looks like a broken cluster rather than
+a finished session. So ocpgate says so:
+
+- Inside a `connect` shell, warnings print to stderr at 15 minutes, 5
+  minutes, and 1 minute remaining, then once when the token lapses.
+- In the TUI, the status bar counts down and turns amber under 15 minutes.
+
+Either way the expiry lands in the audit trail as a `token_expired` event.
+Exit and reconnect to get a fresh token.
+
+### Retries
+
+Network calls — GitLab syncs, the OAuth exchange, namespace lookups — are
+retried up to three times with exponential backoff and jitter, failing in
+about a second so a prompt never looks hung.
+
+Only transient failures are retried: network errors, `429`, and `5xx`.
+Anything definitive fails immediately. In particular **rejected credentials
+are never retried**, because a second attempt cannot succeed and repeating
+a bad password is a good way to trip an LDAP account lockout.
+
 ### Degraded mode
 
 If GitLab is unreachable or `OCPGATE_GITLAB_TOKEN` is unset, `clusters list` and
@@ -273,6 +297,7 @@ and `session.id` are mapped as `keyword` and stay filterable.
 | [`internal/session`](internal/session/) | Writes a single-context kubeconfig (0600) into a per-session directory (0700) and removes it on exit. Cleanup is idempotent and refuses any path outside its own base directory. |
 | [`internal/audit`](internal/audit/) | Builds and emits audit events as newline-delimited JSON. |
 | [`internal/ocp`](internal/ocp/) | Direct cluster API queries that are neither auth nor session lifecycle — currently the namespace lookup behind the TUI selector. |
+| [`internal/retry`](internal/retry/) | Bounded retries with exponential backoff and jitter for every network call, splitting transient failures from definitive ones. |
 | [`internal/tui`](internal/tui/) | Bubble Tea interface — cluster list, credential prompt, namespace selector, and an active-session view with a token countdown. Renders to stderr so stdout stays the audit stream. |
 | [`cmd/ocpgate`](cmd/ocpgate/) | Cobra CLI wiring the modules together. |
 
@@ -379,8 +404,9 @@ so you can diff a real-cluster result against the committed baseline.
 - [x] Config, version, registry, auth, session, audit modules
 - [x] Non-interactive CLI: `ocpgate connect <cluster>` end to end
 - [x] Bubble Tea TUI — searchable cluster list, namespace selector, status bar
-- [ ] Retry logic on transient GitLab / OAuth failures
-- [ ] Token-expiry warning during long-lived sessions
+- [x] Retry logic on transient GitLab / OAuth failures
+- [x] Token-expiry warning during long-lived sessions
+- [ ] Error-message pass against a real cluster's failure modes
 - [ ] Proxy mode — all API calls routed through ocpgate (v2)
 - [ ] Slack/Teams alert on production cluster access
 

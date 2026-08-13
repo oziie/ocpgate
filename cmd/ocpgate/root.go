@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 
 	"github.com/spf13/cobra"
 
@@ -27,6 +28,10 @@ type app struct {
 	// was. This is not fatal on its own: the local cluster cache keeps the
 	// tool usable read-only, so it degrades a sync into a warning.
 	gitlabTokenErr error
+
+	// expiryLogged guards the token_expired audit event, which the expiry
+	// watcher and the session teardown can both reach.
+	expiryLogged atomic.Bool
 }
 
 func newRootCmd() *cobra.Command {

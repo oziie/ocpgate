@@ -126,6 +126,8 @@ ocpgate/
 │   ├── session/
 │   │   ├── session.go                 # Session lifecycle manager
 │   │   ├── kubeconfig.go              # Temp kubeconfig writer + cleanup
+│   │   ├── environ.go                 # KUBECONFIG env for subshells
+│   │   ├── expiry.go                  # Token expiry watcher + countdown format
 │   │   ├── types.go                   # Session struct
 │   │   └── session_test.go
 │   │
@@ -137,6 +139,10 @@ ocpgate/
 │   │
 │   ├── ocp/
 │   │   └── namespaces.go              # Namespace lookup for the TUI selector
+│   │
+│   ├── retry/
+│   │   ├── retry.go                   # Backoff + transient/permanent classification
+│   │   └── retry_test.go
 │   │
 │   └── tui/
 │       ├── app.go                     # Root Bubble Tea model + update loop
@@ -462,11 +468,106 @@ Steps 1–9 are done and covered by tests, including an end-to-end CLI test
 that drives `connect` against a fake OCP OAuth server, and a TUI test that
 drives the full model flow with fake collaborators.
 
-Partially done from step 10, because the earlier steps could not be
-correct without it: signal handling around the subshell, token-expiry
-recording, stale-session pruning, and the non-terminal fallback. Still
-open: retry logic on transient GitLab / OAuth failures, and a visible
-warning as a long-lived session's token approaches expiry.
+Step 10 is largely done: signal handling around the subshell,
+stale-session pruning, the non-terminal fallback, retry logic
+(`internal/retry`), and token-expiry warnings (`session.ExpiryWatcher`).
+What remains is the error-UX pass, deliberately deferred until a real
+cluster exists — the failure messages worth writing are the ones a real
+OAuth server actually produces, not the ones the fakes were built to
+produce.
+
+## Remaining Work (picked up 2026-08-13)
+
+Ordered roughly by what unblocks what.
+
+### 1. Blocked on a real cluster
+
+Ozan is standing up OCP cluster(s) and will supply the real cluster names,
+environments, regions, LDAP realms, and usernames. Until then these stay open:
+
+- [ ] **Verify the five OAuth assumptions** the fakes encode (listed under
+      [Testing](#testing)). Each one is a guess about real OCP behavior.
+- [ ] **Error-UX pass** — the deferred half of step 10. Write messages for
+      the failure modes fakes cannot produce: a disabled LDAP account vs a
+      wrong password (both arrive as 403), the API reachable but the OAuth
+      route not, a custom CA rejected by TLS verification, a token that
+      expires mid-command.
+- [ ] **Namespace listing** — confirm whether ordinary users must use the
+      OCP project API (`project.openshift.io`) instead of `namespaces`. If
+      so, `internal/ocp` needs a second code path.
+- [ ] Run `OCPGATE_TEST_TARGET=<cluster> make test-report` and diff against
+      the committed fakes baseline.
+
+### 2. Coverage gaps (no cluster needed)
+
+- [ ] `internal/ocp` — 0.0%, no test file. `classifyAPIError` in particular
+      encodes real assumptions and is entirely unexercised.
+- [ ] `pkg/config` — 0.0%, no test file. Loading, env-var override,
+      `expandHome`, and `GitLabToken` are all untested.
+- [ ] `internal/tui/views` — 50.0%. The list delegates and `Update` paths
+      are the untested parts.
+- [ ] `cmd/ocpgate` — 62.6%.
+
+### 3. Scaffolding from the project structure that was never built
+
+These directories exist in the tree above but are empty:
+
+- [ ] `docs/decisions/` — the four ADRs referenced throughout this file
+- [ ] `cluster-registry/` — example cluster YAMLs, `cluster.schema.json`,
+      `validate.py`, `.gitlab-ci.yml`. Worth building alongside the real
+      registry repo so the schema matches what Ozan actually defines.
+- [ ] `deployments/opensearch/` — `index-template.json` (must exist before
+      the first audit log lands) and `dashboard.ndjson`
+- [ ] `.goreleaser.yml` — single-binary release pipeline
+
+### 4. Deliberately out of scope for v1
+
+Proxy mode, web UI, Slack/Teams alerts on production access, Vault
+integration, Boundary migration. See [Future / Out of Scope](#future--out-of-scope-for-v1).
+
+## Retry policy (`internal/retry`)
+
+One retry layer for every network call, with a single distinction that
+drives everything: **transient versus definitive**. Callers mark definitive
+failures with `retry.Permanent(err)`; anything else is retried with
+exponential backoff and equal jitter. The wrapper is stripped before the
+error reaches the caller, so sentinel matching still works.
+
+What is *not* retried, and why it matters:
+
+- **Rejected credentials** (401/403 from the OAuth server). Retrying a bad
+  password cannot succeed and is a good way to trip an LDAP account lockout.
+- **A rejected GitLab token** or missing project (any 4xx except 429).
+- **A malformed OAuth redirect** — a protocol mismatch, not a blip.
+- **A 404 on OAuth discovery** — that cluster simply does not publish it,
+  so retrying would slow every login on such a cluster.
+
+Retried: network failures, 429, and 5xx.
+
+**Do not layer this on a client that already retries.** go-gitlab wraps its
+transport in `retryablehttp` with `RetryMax: 5` and a backoff running to
+30s; nested inside our loop that is up to 15 attempts and minutes of
+sleeping behind a prompt, and it has no notion of permanence. The GitLab
+client is therefore constructed with `gitlab.WithoutRetries()`.
+
+## Token expiry (`session.ExpiryWatcher`)
+
+The token expires silently — kubectl just starts returning 401, which
+reads like a broken cluster rather than a finished session. So expiry is
+surfaced twice over:
+
+- `connect` runs a watcher goroutine that warns on stderr at 15m, 5m, and
+  1m remaining, then once at expiry. A shell has no status bar, so the
+  warning has to come to the engineer.
+- The TUI's existing one-second tick notices the lapse and shows it.
+
+Thresholds already in the past when a session starts are skipped, so a
+short-lived token does not open with a burst of warnings.
+
+Both paths emit `token_expired`, and both guard against emitting it twice
+(`app.expiryLogged` / `Model.expiryLogged`) — the watcher usually gets
+there first, and teardown covers a process suspended straight through the
+expiry.
 
 ## Testing
 
