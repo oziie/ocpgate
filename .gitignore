@@ -6,5 +6,11 @@
 coverage.out
 *.test
 
+# Test reports: only the latest report is tracked, as the current baseline.
+# The run history, raw log, and coverage profile stay local.
+/reports/history/
+/reports/test-log.txt
+/reports/coverage.out
+
 # Editor / OS noise
 .DS_Store

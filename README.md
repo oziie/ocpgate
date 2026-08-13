@@ -334,16 +334,43 @@ Full ADRs live in [`docs/decisions/`](docs/decisions/).
 ## Development
 
 ```bash
-make check     # gofmt + go vet + go test
-make test      # tests only
-make cover     # coverage report in the browser
-make fmt       # format
-make build     # dist/ocpgate
+make check        # gofmt + go vet + go test
+make test         # tests only
+make cover        # coverage report in the browser
+make test-report  # durable pass/fail + coverage report in reports/
+make fmt          # format
+make build        # dist/ocpgate
 ```
 
 The CLI has an end-to-end test that drives `connect` against a fake OCP OAuth
 server and asserts the session directory is deleted afterwards — no cluster
-required.
+required. The TUI has a matching test that drives the full model flow with
+fake collaborators.
+
+### Test reports
+
+`make test-report` runs the suite with the race detector and coverage, then
+writes a report to `reports/test-report.md`, archiving a timestamped copy
+under `reports/history/`. Only the latest report is committed, as the
+current baseline; the archive, raw log, and coverage profile stay local.
+
+Every report is stamped with a **target**, which records what the run
+actually exercised:
+
+```bash
+make test-report                                    # target: fakes (default)
+OCPGATE_TEST_TARGET=prod-cluster-1 make test-report  # against real infrastructure
+OCPGATE_RACE=0 make test-report                      # skip the race detector
+```
+
+This distinction matters. A default run stubs the OCP OAuth server, the
+cluster API, and GitLab in-process — it proves ocpgate's own logic and
+nothing about how a real cluster behaves. The report says so explicitly and
+lists the assumptions still unverified: the discovery document's shape, the
+`X-CSRF-Token` challenge, the token arriving in the redirect fragment, what
+a 401/403 really means, and whether namespace listing is refused for
+ordinary users. Your local `reports/history/` accumulates both kinds of run
+so you can diff a real-cluster result against the committed baseline.
 
 ---
 

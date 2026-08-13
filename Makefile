@@ -37,6 +37,10 @@ cover: ## Run tests and open the coverage report
 	go test -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
 
+.PHONY: test-report
+test-report: ## Write a durable pass/fail + coverage report to reports/
+	@./scripts/test-report.sh
+
 .PHONY: fmt
 fmt: ## Format all Go sources
 	gofmt -w .

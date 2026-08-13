@@ -468,6 +468,36 @@ recording, stale-session pruning, and the non-terminal fallback. Still
 open: retry logic on transient GitLab / OAuth failures, and a visible
 warning as a long-lived session's token approaches expiry.
 
+## Testing
+
+Everything so far is tested against **fakes**: the OCP OAuth server, the
+cluster API, and GitLab are all stubbed in-process. The fakes live in
+`internal/auth/auth_test.go` (`fakeOCP`), `cmd/ocpgate/connect_test.go`
+(`newFakeCluster`), and `internal/tui/app_test.go` (fake authenticator,
+session manager, and audit recorder).
+
+`make test-report` (→ `scripts/test-report.sh`) runs the suite with the
+race detector and coverage and writes `reports/test-report.md`, archiving a
+timestamped copy in `reports/history/`. Reports are stamped with a target
+(`OCPGATE_TEST_TARGET`, default `fakes`) so a fakes run and a real-cluster
+run stay distinguishable. Only `reports/test-report.md` is committed, as
+the current baseline; `reports/history/`, the raw log, and the coverage
+profile are gitignored.
+
+When editing that script: `go test` reports packages in three different
+line shapes (`ok`, `?`, and a bare indented line for a no-test package that
+was still instrumented). All three must be parsed or packages silently
+vanish from the report.
+
+Assumptions the fakes encode, still unverified against a real cluster:
+
+- `/.well-known/oauth-authorization-server` returns `authorization_endpoint`
+- `X-CSRF-Token: 1` yields a Basic challenge rather than the HTML login page
+- the token arrives in the redirect's URL fragment (`access_token`, `expires_in`)
+- 401/403 means bad credentials, not a disabled account or LDAP timeout
+- namespace listing is normally forbidden for ordinary users, and the OCP
+  project API is not needed instead
+
 ## TUI (step 9, as built)
 
 State machine in `internal/tui/app.go`:
