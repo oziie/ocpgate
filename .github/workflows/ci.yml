@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to the same branch makes an in-flight run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Floor for total statement coverage. Raise it as gaps close; never
+  # lower it to make a red build green.
+  COVERAGE_FLOOR: "60.0"
+
+jobs:
+  test:
+    name: build & test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Read the version from go.mod so CI cannot drift from the
+          # toolchain the module actually declares.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        # The race detector matters here: the audit logger, the expiry
+        # watcher, and the TUI's async commands all run concurrently.
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Coverage
+        run: |
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}')"
+          pct="${total%\%}"
+
+          echo "### Coverage: $total" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Floor: ${COVERAGE_FLOOR}%" >> "$GITHUB_STEP_SUMMARY"
+
+          if awk "BEGIN { exit !($pct < $COVERAGE_FLOOR) }"; then
+            echo "::error::total coverage $total is below the ${COVERAGE_FLOOR}% floor"
+            exit 1
+          fi
+          echo "total coverage $total (floor ${COVERAGE_FLOOR}%)"
+
+      - name: Upload coverage profile
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 14

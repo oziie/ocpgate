@@ -4,8 +4,8 @@
 |---|---|
 | Result | **PASS** |
 | Target | `fakes` |
-| Generated | 2026-08-13T08:35:08Z |
-| Commit | 12e85e8 (dirty) |
+| Generated | 2026-08-14T08:13:41Z |
+| Commit | 909849c (dirty) |
 | Go | go1.24.5 darwin/arm64 |
 | Race detector | enabled |
 | Total coverage | 67.1% |
@@ -17,17 +17,17 @@ Tests: **100 passed**, **0 failed**, 0 skipped
 
 | Package | Result | Time | Coverage |
 |---|---|---|---|
-| `cmd/ocpgate` | ok | 3.513s | 62.6% |
-| `internal/audit` | ok | 1.850s | 90.0% |
-| `internal/auth` | ok | 1.596s | 82.1% |
+| `cmd/ocpgate` | ok | 3.706s | 62.6% |
+| `internal/audit` | ok | 2.302s | 90.0% |
+| `internal/auth` | ok | 2.585s | 82.1% |
 | `internal/ocp` | no tests | — | 0.0% |
-| `internal/registry` | ok | 1.715s | 85.9% |
-| `internal/retry` | ok | 2.341s | 91.7% |
-| `internal/session` | ok | 3.012s | 78.9% |
+| `internal/registry` | ok | 2.956s | 85.9% |
+| `internal/retry` | ok | 3.255s | 91.7% |
+| `internal/session` | ok | 3.566s | 78.9% |
 | `internal/tui/keys` | no tests | — | 0.0% |
 | `internal/tui/styles` | no tests | — | — |
-| `internal/tui/views` | ok | 2.016s | 50.0% |
-| `internal/tui` | ok | 8.743s | 78.4% |
+| `internal/tui/views` | ok | 2.097s | 50.0% |
+| `internal/tui` | ok | 7.978s | 78.4% |
 | `pkg/config` | no tests | — | 0.0% |
 | `pkg/version` | no tests | — | 0.0% |
 

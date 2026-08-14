@@ -1,5 +1,12 @@
 # ocpgate
 
+[![CI](https://github.com/oziie/ocpgate/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/oziie/ocpgate/actions/workflows/ci.yml)
+[![Status](https://img.shields.io/badge/status-work%20in%20progress-orange)](#project-status)
+[![Verified against](https://img.shields.io/badge/verified%20against-fakes%20only-critical)](#project-status)
+[![Coverage](https://img.shields.io/badge/coverage-67.1%25-yellow)](reports/test-report.md)
+[![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8)](go.mod)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 A single, audited entrypoint for accessing OpenShift (OCP) clusters.
 
 `ocpgate` reads your cluster list from a GitOps-managed GitLab registry,
@@ -8,6 +15,40 @@ drops you into a shell with a temporary kubeconfig that is deleted when you exit
 Every access is emitted as a structured JSON audit event.
 
 **No kubeconfig, password, or token is ever written to a permanent location.**
+
+---
+
+## Project status
+
+**Work in progress — not production ready.** The tool builds, runs, and is
+covered by tests, but every one of those tests runs against **fakes**: the OCP
+OAuth server, the cluster API, and GitLab are all stubbed in-process. Nothing
+here has talked to a real OpenShift cluster yet.
+
+| | |
+|---|---|
+| Build order | steps 1–9 complete, step 10 partial |
+| Tests | 100 passing, 0 failing (race detector enabled) |
+| Coverage | 67.1%, enforced at a 60% floor by CI |
+| Verified against | fakes only — no real cluster yet |
+
+**Working:** config, cluster registry, OCP OAuth, session and kubeconfig
+lifecycle, audit logging, the CLI, the Bubble Tea TUI, retry logic, and
+token-expiry warnings.
+
+**Not done yet:** the error-UX pass, deliberately deferred so failure messages
+get written against real failures rather than invented ones; and five
+assumptions about OCP's OAuth behavior that the fakes encode but no real server
+has confirmed. The `docs/decisions/`, `cluster-registry/`, and
+`deployments/opensearch/` directories are still empty scaffolding.
+
+Full breakdown in [CLAUDE.md](CLAUDE.md).
+
+> The CI badge is live — it reflects the latest run on `main`. The coverage
+> figure is not: it is copied from the committed
+> [test report](reports/test-report.md) and refreshed with `make test-report`.
+> CI does enforce a 60% floor on every push, so the number can drift upward
+> without the badge noticing, but it cannot quietly collapse.
 
 ---
 
@@ -21,8 +62,9 @@ Every access is emitted as a structured JSON audit event.
 for identity, GitLab for the cluster registry, and the existing Fluentd →
 OpenSearch pipeline for audit.
 
-> **Status: interim solution.** This is a deliberate bridge toward a full
-> HashiCorp Vault + Boundary adoption. See [Migration path](#migration-path).
+> **By design, an interim solution.** This is a deliberate bridge toward a full
+> HashiCorp Vault + Boundary adoption, not a permanent fixture. See
+> [Migration path](#migration-path).
 
 ---
 
@@ -371,6 +413,17 @@ The CLI has an end-to-end test that drives `connect` against a fake OCP OAuth
 server and asserts the session directory is deleted afterwards — no cluster
 required. The TUI has a matching test that drives the full model flow with
 fake collaborators.
+
+### CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
+pull request against `main`: gofmt, `go vet`, a build, then the full suite with
+the race detector and coverage. The Go version comes from `go.mod`, so CI cannot
+drift from the toolchain the module declares.
+
+The coverage step fails the build below a **60% floor** and writes the total to
+the run summary; the profile is uploaded as an artifact. Raise the floor as gaps
+close — never lower it to turn a red build green.
 
 ### Test reports
 
