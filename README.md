@@ -7,6 +7,12 @@
 [![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8)](go.mod)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
+
+<p align="center">
+  <img src="img/ocpgate-banner.jpeg" alt="ocpgate — a single, audited entrypoint for OpenShift clusters" width="640">
+</p>
+
+
 A single, audited entrypoint for accessing OpenShift (OCP) clusters.
 
 `ocpgate` reads your cluster list from a GitOps-managed GitLab registry,
